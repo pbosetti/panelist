@@ -97,6 +97,10 @@ Pass a sample count as the first argument, or `0` to run until interrupted:
 ./build/panelist_three_panels 0
 ```
 
+You will get something like:
+
+<script src="https://asciinema.org/a/wmkjWdV1fXIQsKLZ.js" id="asciicast-wmkjWdV1fXIQsKLZ" async="true"></script>
+
 # Author
 
 Paolo Bosetti, University of Trento
