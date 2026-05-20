@@ -4,6 +4,10 @@
 #include <sstream>
 
 int main() {
+  const auto version = Panelist::Panelist::version();
+  assert(!version.empty());
+  assert(version.front() == 'v');
+
   std::ostringstream output;
 
   Panelist::Panelist panels(output);

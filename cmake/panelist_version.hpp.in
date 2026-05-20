@@ -1,0 +1,20 @@
+#ifndef PANELIST_PANELIST_VERSION_HPP
+#define PANELIST_PANELIST_VERSION_HPP
+
+/**
+ * @file panelist_version.hpp
+ * @brief Configured Panelist version string.
+ */
+
+#include <string_view>
+
+namespace Panelist {
+
+/**
+ * @brief Panelist version string configured by CMake.
+ */
+inline constexpr std::string_view Version = "@PANELIST_VERSION_TAG@";
+
+} // namespace Panelist
+
+#endif // PANELIST_PANELIST_VERSION_HPP

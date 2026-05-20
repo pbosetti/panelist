@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Configure MSVC
         if: runner.os == 'Windows'
@@ -43,6 +45,7 @@ jobs:
           cmake -S . -B build -G Ninja
           -DPANELIST_BUILD_TESTS=ON
           -DPANELIST_BUILD_EXAMPLES=ON
+          -DPANELIST_BUILD_PACKAGE=OFF
 
       - name: Configure
         if: runner.os == 'Windows'
@@ -50,6 +53,7 @@ jobs:
           cmake -S . -B build -G Ninja
           -DPANELIST_BUILD_TESTS=ON
           -DPANELIST_BUILD_EXAMPLES=ON
+          -DPANELIST_BUILD_PACKAGE=OFF
 
       - name: Build
         run: cmake --build build --config Release

@@ -3,7 +3,7 @@
 
 /**
  * @file panelist.hpp
- * @brief Header-only C++20 terminal panel output helper.
+ * @brief Header-only C++17 terminal panel output helper.
  *
  * Panelist divides an interactive terminal into vertically stacked panels and
  * lets callers write either scrolling log output or addressed panel lines using
@@ -37,6 +37,8 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #endif
+
+#include "panelist_version.hpp"
 
 /**
  * @brief Public namespace for the Panelist terminal panel library.
@@ -120,6 +122,19 @@ public:
     std::size_t _panel_index = 0;
     std::size_t _line_from_bottom = 0;
   };
+
+  /**
+   * @brief Return the Panelist version string.
+   *
+   * The value is supplied by CMake from the latest reachable git tag matching
+   * `vMAJOR.MINOR.PATCH`. If the header is used without CMake, or no matching
+   * tag is available at configure time, this returns `v0.0.0`.
+   *
+   * @return Version string in the form `v0.1.2`.
+   */
+  static constexpr std::string_view version() noexcept {
+    return Version;
+  }
 
   /**
    * @brief Construct a panel manager for an output stream.

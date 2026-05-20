@@ -3,7 +3,7 @@
 
 # Panelist
 
-Panelist is a header-only C++20 helper for splitting terminal output into
+Panelist is a header-only C++17 helper for splitting terminal output into
 vertically stacked panels. Panels can be used as scrolling logs or written by
 line number, where line `0` is the bottom line of a panel.
 
@@ -55,6 +55,20 @@ cmake --build build --target document
 This requires Doxygen. The generated HTML documentation is written to
 `build/docs/html/index.html`.
 
+### Package
+
+The `package` target creates a release tarball containing the public
+`include` tree and generated Doxygen HTML documentation under `doc`:
+
+```sh
+cmake -S . -B build -G Ninja -DPANELIST_BUILD_PACKAGE=ON
+cmake --build build --target package
+```
+
+The output file is written as `build/panelist-vX.Y.Z.tar.gz`, where `vX.Y.Z`
+is the latest reachable git tag matching `vMAJOR.MINOR.PATCH`, or `v0.0.0`
+when no matching tag is available.
+
 ## API
 
 ```c++
@@ -96,6 +110,11 @@ Useful methods:
 - `clear(index)`: clear one panel
 - `disable()` / `enable()`: temporarily leave and re-enter panel mode
 - `reset()`: remove the layout so panels can be defined again
+- `version()`: return the current version string, for example `v0.1.2`
+
+The version string is taken from the latest reachable git tag matching
+`vMAJOR.MINOR.PATCH`; if no matching tag is available, it defaults to
+`v0.0.0`.
 
 ## Example
 
