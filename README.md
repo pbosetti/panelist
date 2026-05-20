@@ -1,4 +1,5 @@
-![CI](https://github.com/pbosetti/panelist/actions/workflows/ci.yml/badge.svg?branch=main)
+[![CI](https://github.com/pbosetti/panelist/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pbosetti/panelist/actions/workflows/ci.yml)
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://pbosetti.github.io/panelist/)
 
 # Panelist
 
