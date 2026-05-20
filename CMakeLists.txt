@@ -10,7 +10,7 @@ endif()
 add_library(panelist INTERFACE)
 add_library(panelist::panelist ALIAS panelist)
 
-target_compile_features(panelist INTERFACE cxx_std_20)
+target_compile_features(panelist INTERFACE cxx_std_17)
 target_include_directories(
   panelist
   INTERFACE
@@ -19,6 +19,8 @@ target_include_directories(
 
 option(PANELIST_BUILD_TESTS "Build Panelist tests" ${PANELIST_IS_TOP_LEVEL})
 option(PANELIST_BUILD_EXAMPLES "Build Panelist examples" ${PANELIST_IS_TOP_LEVEL})
+option(PANELIST_BUILD_DOCUMENTATION "Add the Panelist Doxygen documentation target"
+       OFF)
 
 if(PANELIST_BUILD_EXAMPLES)
   add_executable(panelist_three_panels examples/three_panels.cpp)
@@ -47,4 +49,35 @@ if(PANELIST_BUILD_TESTS)
             "${PANELIST_FETCH_CONTENT_BINARY_DIR}")
   set_tests_properties(panelist_fetch_content_build
                        PROPERTIES DEPENDS panelist_fetch_content_configure)
+endif()
+
+if(PANELIST_BUILD_DOCUMENTATION)
+  find_package(Doxygen QUIET)
+
+  if(DOXYGEN_FOUND)
+    set(DOXYGEN_PROJECT_NAME "${PROJECT_NAME}")
+    set(DOXYGEN_PROJECT_BRIEF
+        "Header-only C++17 terminal panel output helper")
+    set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/docs")
+    set(DOXYGEN_GENERATE_HTML YES)
+    set(DOXYGEN_HTML_OUTPUT html)
+    set(DOXYGEN_GENERATE_LATEX NO)
+    set(DOXYGEN_RECURSIVE YES)
+    set(DOXYGEN_USE_MDFILE_AS_MAINPAGE
+        "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+
+    doxygen_add_docs(
+      document
+      "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+      COMMENT
+        "Generate HTML documentation in ${CMAKE_CURRENT_BINARY_DIR}/docs/html")
+  else()
+    add_custom_target(
+      document
+      COMMAND
+        "${CMAKE_COMMAND}" -E echo
+        "Doxygen was not found. Install Doxygen or configure with -DPANELIST_BUILD_DOCUMENTATION=OFF."
+      COMMAND "${CMAKE_COMMAND}" -E false)
+  endif()
 endif()

@@ -1,6 +1,17 @@
 #ifndef PANELIST_PANELIST_HPP
 #define PANELIST_PANELIST_HPP
 
+/**
+ * @file panelist.hpp
+ * @brief Header-only C++20 terminal panel output helper.
+ *
+ * Panelist divides an interactive terminal into vertically stacked panels and
+ * lets callers write either scrolling log output or addressed panel lines using
+ * ordinary `std::ostream` insertion syntax. When the wrapped stream is not
+ * connected to a supported terminal, panel selections are transparent no-ops
+ * and output is written normally.
+ */
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
@@ -27,14 +38,52 @@
 #include <unistd.h>
 #endif
 
+/**
+ * @brief Public namespace for the Panelist terminal panel library.
+ */
 namespace Panelist {
 
+/**
+ * @brief Manages a panelized view over a single output stream.
+ *
+ * A Panelist object owns the layout metadata and temporary stream buffer used
+ * to route output to panels. Panels are added before calling layout(); after
+ * layout(), `operator[]` returns stream manipulators that select a panel.
+ *
+ * @code
+ * Panelist::Panelist panels(std::cout);
+ * panels.add_panel(2);
+ * panels.add_panel();
+ * panels.add_panel(2);
+ * panels.layout();
+ *
+ * std::cout << panels[1] << "scrolling log line" << std::endl;
+ * std::cout << panels[2][0] << "bottom status line" << std::endl;
+ * @endcode
+ *
+ * @note The object is bound to the stream passed to the constructor. In
+ * interactive mode, inserting a panel selection into another stream is an
+ * error.
+ */
 class Panelist {
 public:
   class LineSelection;
 
+  /**
+   * @brief Stream selection proxy for append-style panel output.
+   *
+   * This proxy is returned by Panelist::operator[] and is meant to be inserted
+   * into the same stream managed by the owning Panelist object.
+   */
   class PanelSelection {
   public:
+    /**
+     * @brief Select an addressed line inside the panel.
+     *
+     * @param line_from_bottom Line index inside the selected panel, where `0`
+     * is the bottom line, `1` is the line above it, and so on.
+     * @return A LineSelection proxy suitable for stream insertion.
+     */
     LineSelection operator[](std::size_t line_from_bottom) const;
 
   private:
@@ -49,6 +98,12 @@ public:
     std::size_t _panel_index = 0;
   };
 
+  /**
+   * @brief Stream selection proxy for addressed-line panel output.
+   *
+   * Line selections are created with `panels[panel][line]` or line() and are
+   * inserted into the managed stream before the text to write.
+   */
   class LineSelection {
   private:
     friend class PanelSelection;
@@ -66,6 +121,13 @@ public:
     std::size_t _line_from_bottom = 0;
   };
 
+  /**
+   * @brief Construct a panel manager for an output stream.
+   *
+   * @param stream Stream that will receive panelized output. `std::cout`,
+   * `std::cerr`, and `std::clog` are recognized for terminal detection. Other
+   * streams are treated as non-interactive pass-through streams.
+   */
   explicit Panelist(std::ostream &stream)
       : _stream(stream), _original_rdbuf(stream.rdbuf()),
         _capture_buffer(*this) {
@@ -78,11 +140,21 @@ public:
 #endif
   }
 
+  /** @brief Panelist objects cannot be copied. */
   Panelist(const Panelist &) = delete;
+
+  /** @brief Panelist objects cannot be copy-assigned. */
   Panelist &operator=(const Panelist &) = delete;
+
+  /** @brief Panelist objects cannot be moved. */
   Panelist(Panelist &&) = delete;
+
+  /** @brief Panelist objects cannot be move-assigned. */
   Panelist &operator=(Panelist &&) = delete;
 
+  /**
+   * @brief Restore the stream and terminal mode before destruction.
+   */
   ~Panelist() {
     try {
       reset();
@@ -90,6 +162,12 @@ public:
     }
   }
 
+  /**
+   * @brief Set the separator text repeated between panels.
+   *
+   * @param separator Text repeated to fill each separator row. Empty strings
+   * are treated as a single space.
+   */
   void set_separator(std::string separator) {
     _separator = separator.empty() ? std::string(" ") : std::move(separator);
     if (panel_mode_active()) {
@@ -97,6 +175,15 @@ public:
     }
   }
 
+  /**
+   * @brief Add the flexible panel.
+   *
+   * The flexible panel receives all terminal rows not consumed by fixed panels
+   * and separator rows. Only one flexible panel may be explicitly added.
+   *
+   * @throws std::logic_error If called after layout() or if a flexible panel
+   * was already added.
+   */
   void add_panel() {
     ensure_not_laid_out("add_panel");
     if (_explicit_flexible_panel.has_value()) {
@@ -107,6 +194,17 @@ public:
     _panel_specs.push_back(PanelSpec{std::nullopt});
   }
 
+  /**
+   * @brief Add a fixed-height panel.
+   *
+   * If no explicit flexible panel is added before layout(), the last panel is
+   * used as the flexible panel and this height becomes its minimum height.
+   *
+   * @param height Requested fixed height, in terminal rows.
+   *
+   * @throws std::logic_error If called after layout().
+   * @throws std::invalid_argument If @p height is zero.
+   */
   void add_panel(std::size_t height) {
     ensure_not_laid_out("add_panel");
     if (height == 0) {
@@ -116,6 +214,14 @@ public:
     _panel_specs.push_back(PanelSpec{height});
   }
 
+  /**
+   * @brief Choose which already-added panel is flexible.
+   *
+   * @param panel_index Zero-based panel index.
+   *
+   * @throws std::logic_error If called after layout().
+   * @throws std::out_of_range If @p panel_index does not name an added panel.
+   */
   void set_flexible_panel(std::size_t panel_index) {
     ensure_not_laid_out("set_flexible_panel");
     if (panel_index >= _panel_specs.size()) {
@@ -125,6 +231,17 @@ public:
     _explicit_flexible_panel = panel_index;
   }
 
+  /**
+   * @brief Finalize the panel list and enable panel mode.
+   *
+   * This computes the current terminal layout, switches supported terminals to
+   * panel mode, and makes subsequent panel selections active. Adding more
+   * panels after this call is an error.
+   *
+   * @throws std::logic_error If no panels were added.
+   * @throws std::runtime_error If the interactive terminal is too short for the
+   * requested panel layout.
+   */
   void layout() {
     if (_panel_specs.empty()) {
       throw std::logic_error("Panelist layout requires at least one panel");
@@ -137,6 +254,13 @@ public:
     enable();
   }
 
+  /**
+   * @brief Re-enable panel mode after disable().
+   *
+   * @throws std::logic_error If layout() has not been called.
+   * @throws std::runtime_error If the interactive terminal is too short for the
+   * requested panel layout.
+   */
   void enable() {
     if (!_laid_out) {
       throw std::logic_error("Panelist::layout must be called before enable");
@@ -153,6 +277,12 @@ public:
     render_all();
   }
 
+  /**
+   * @brief Temporarily leave panel mode and restore normal stream output.
+   *
+   * Existing panel definitions and buffered panel contents are preserved, so
+   * enable() can later re-enter panel mode.
+   */
   void disable() {
     if (!_enabled) {
       return;
@@ -170,6 +300,12 @@ public:
     _enabled = false;
   }
 
+  /**
+   * @brief Remove the current layout and return to the pre-layout state.
+   *
+   * After reset(), panels may be added again and layout() may be called to
+   * create a new arrangement.
+   */
   void reset() {
     disable();
     _panel_specs.clear();
@@ -182,10 +318,26 @@ public:
     _laid_out = false;
   }
 
+  /**
+   * @brief Alias for reset().
+   */
   void remove() { reset(); }
 
+  /**
+   * @brief Alias for reset().
+   *
+   * This avoids using `delete`, which is a C++ keyword and cannot be a member
+   * function name.
+   */
   void delete_panels() { reset(); }
 
+  /**
+   * @brief Clear all visible and pending contents from one panel.
+   *
+   * @param panel_index Zero-based panel index.
+   *
+   * @throws std::out_of_range If @p panel_index does not name an added panel.
+   */
   void clear(std::size_t panel_index) {
     ensure_panel_index(panel_index);
 
@@ -205,18 +357,49 @@ public:
     }
   }
 
+  /**
+   * @brief Select a panel for append-style scrolling output.
+   *
+   * @param panel_index Zero-based panel index.
+   * @return A PanelSelection proxy for stream insertion.
+   *
+   * @code
+   * std::cout << panels[1] << "log line" << std::endl;
+   * @endcode
+   */
   PanelSelection operator[](std::size_t panel_index) {
     return PanelSelection(this, panel_index);
   }
 
+  /**
+   * @brief Select an addressed line inside a panel.
+   *
+   * This is equivalent to `panels[panel_index][line_from_bottom]` and is useful
+   * when a named function call is clearer.
+   *
+   * @param panel_index Zero-based panel index.
+   * @param line_from_bottom Line index inside the panel, where `0` is the
+   * bottom line.
+   * @return A LineSelection proxy for stream insertion.
+   */
   LineSelection line(std::size_t panel_index, std::size_t line_from_bottom) {
     return LineSelection(this, panel_index, line_from_bottom);
   }
 
+  /**
+   * @brief Return the number of configured panels.
+   */
   std::size_t panel_count() const { return _panel_specs.size(); }
 
+  /**
+   * @brief Return whether panel mode is currently enabled.
+   */
   bool enabled() const { return _enabled; }
 
+  /**
+   * @brief Return whether the managed stream is attached to a supported
+   * interactive terminal.
+   */
   bool interactive() const { return _interactive; }
 
 private:
@@ -851,6 +1034,19 @@ Panelist::PanelSelection::operator[](std::size_t line_from_bottom) const {
   return LineSelection(_owner, _panel_index, line_from_bottom);
 }
 
+/**
+ * @brief Select a panel as the target for subsequent appended output.
+ *
+ * @param stream Stream that must be the stream managed by the owning Panelist
+ * object when panel mode is active.
+ * @param selection Panel selection proxy returned by Panelist::operator[].
+ * @return @p stream.
+ *
+ * @throws std::logic_error If @p selection is inserted into a different stream
+ * while panel mode is active.
+ * @throws std::out_of_range If the selected panel index is invalid while panel
+ * mode is active.
+ */
 inline std::ostream &operator<<(std::ostream &stream,
                                 const Panelist::PanelSelection &selection) {
   if (selection._owner != nullptr) {
@@ -861,6 +1057,20 @@ inline std::ostream &operator<<(std::ostream &stream,
   return stream;
 }
 
+/**
+ * @brief Select a panel line as the target for subsequent addressed output.
+ *
+ * @param stream Stream that must be the stream managed by the owning Panelist
+ * object when panel mode is active.
+ * @param selection Line selection proxy returned by
+ * Panelist::PanelSelection::operator[] or Panelist::line().
+ * @return @p stream.
+ *
+ * @throws std::logic_error If @p selection is inserted into a different stream
+ * while panel mode is active.
+ * @throws std::out_of_range If the selected panel or line index is invalid
+ * while panel mode is active.
+ */
 inline std::ostream &operator<<(std::ostream &stream,
                                 const Panelist::LineSelection &selection) {
   if (selection._owner != nullptr) {

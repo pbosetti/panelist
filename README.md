@@ -40,6 +40,18 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+### Documentation
+
+The `document` target is optional. Enable it when configuring, then build it:
+
+```sh
+cmake -S . -B build -G Ninja -DPANELIST_BUILD_DOCUMENTATION=ON
+cmake --build build --target document
+```
+
+This requires Doxygen. The generated HTML documentation is written to
+`build/docs/html/index.html`.
+
 ## API
 
 ```c++
