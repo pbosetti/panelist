@@ -42,6 +42,8 @@ ctest --test-dir build --output-on-failure
 
 ### Documentation
 
+> Detailed class documentation is here: <https://pbosetti.github.io/panelist/>.
+
 The `document` target is optional. Enable it when configuring, then build it:
 
 ```sh
