@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.20)
 
 project(panelist VERSION 0.1.0 LANGUAGES CXX)
 
+set(PANELIST_IS_TOP_LEVEL OFF)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  set(PANELIST_IS_TOP_LEVEL ON)
+endif()
+
 add_library(panelist INTERFACE)
 add_library(panelist::panelist ALIAS panelist)
 
@@ -12,8 +17,8 @@ target_include_directories(
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 
-option(PANELIST_BUILD_TESTS "Build Panelist tests" ON)
-option(PANELIST_BUILD_EXAMPLES "Build Panelist examples" ON)
+option(PANELIST_BUILD_TESTS "Build Panelist tests" ${PANELIST_IS_TOP_LEVEL})
+option(PANELIST_BUILD_EXAMPLES "Build Panelist examples" ${PANELIST_IS_TOP_LEVEL})
 
 if(PANELIST_BUILD_EXAMPLES)
   add_executable(panelist_three_panels examples/three_panels.cpp)
@@ -27,4 +32,19 @@ if(PANELIST_BUILD_TESTS)
   target_link_libraries(panelist_compile_api PRIVATE panelist::panelist)
 
   add_test(NAME panelist_compile_api COMMAND panelist_compile_api)
+
+  set(PANELIST_FETCH_CONTENT_BINARY_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/fetch_content_consumer")
+  add_test(
+    NAME panelist_fetch_content_configure
+    COMMAND
+      "${CMAKE_COMMAND}" -S
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/fetch_content_consumer" -B
+      "${PANELIST_FETCH_CONTENT_BINARY_DIR}" -G "${CMAKE_GENERATOR}")
+  add_test(
+    NAME panelist_fetch_content_build
+    COMMAND "${CMAKE_COMMAND}" --build
+            "${PANELIST_FETCH_CONTENT_BINARY_DIR}")
+  set_tests_properties(panelist_fetch_content_build
+                       PROPERTIES DEPENDS panelist_fetch_content_configure)
 endif()

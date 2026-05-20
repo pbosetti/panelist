@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+          - name: macOS
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+          - name: Windows
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        if: runner.os != 'Windows'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: >
+          cmake -S . -B build -G Ninja
+          -DPANELIST_BUILD_TESTS=ON
+          -DPANELIST_BUILD_EXAMPLES=ON
+
+      - name: Configure
+        if: runner.os == 'Windows'
+        run: >
+          cmake -S . -B build -G Ninja
+          -DPANELIST_BUILD_TESTS=ON
+          -DPANELIST_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure
