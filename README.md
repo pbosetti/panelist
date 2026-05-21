@@ -99,7 +99,8 @@ int main() {
 
 Use `panels[index]` to append to a panel as a scrolling log. Use
 `panels[index][line_from_bottom]` to write a specific line. After `layout()`,
-adding more panels is an error.
+adding more panels is an error. After `disable()`, output chains that start
+with a panel selection are discarded until panel output is enabled again.
 
 Useful methods:
 
@@ -108,7 +109,8 @@ Useful methods:
 - `add_panel()`: add the flexible panel
 - `set_flexible_panel(index)`: choose which panel resizes with the terminal
 - `clear(index)`: clear one panel
-- `disable()` / `enable()`: temporarily leave and re-enter panel mode
+- `disable()` / `enable()` / `enable(bool)`: temporarily leave and re-enter
+  panel mode
 - `reset()`: remove the layout so panels can be defined again
 - `version()`: return the current version string, for example `v0.1.2`
 
