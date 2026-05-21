@@ -99,8 +99,9 @@ int main() {
 
 Use `panels[index]` to append to a panel as a scrolling log. Use
 `panels[index][line_from_bottom]` to write a specific line. After `layout()`,
-adding more panels is an error. After `disable()`, output chains that start
-with a panel selection are discarded until panel output is enabled again.
+adding more panels is an error. After `disable()`, panel selections are
+transparent no-ops and output is written normally until panel output is enabled
+again.
 
 Useful methods:
 

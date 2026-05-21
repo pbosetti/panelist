@@ -9,8 +9,8 @@
  * lets callers write either scrolling log output or addressed panel lines using
  * ordinary `std::ostream` insertion syntax. When the wrapped stream is not
  * connected to a supported terminal, panel selections are transparent no-ops
- * and output is written normally. After disable(), insertions that start with a
- * panel selection are discarded until panel output is enabled again.
+ * and output is written normally. After disable(), panel selections are also
+ * transparent no-ops until panel output is enabled again.
  */
 
 #include <algorithm>
@@ -70,7 +70,6 @@ namespace Panelist {
  */
 class Panelist {
 public:
-  class StreamProxy;
   class LineSelection;
 
   /**
@@ -92,9 +91,8 @@ public:
 
   private:
     friend class Panelist;
-    friend class StreamProxy;
-    friend StreamProxy operator<<(std::ostream &stream,
-                                  const PanelSelection &selection);
+    friend std::ostream &operator<<(std::ostream &stream,
+                                    const PanelSelection &selection);
 
     PanelSelection(Panelist *owner, std::size_t panel_index)
         : _owner(owner), _panel_index(panel_index) {}
@@ -113,9 +111,8 @@ public:
   private:
     friend class PanelSelection;
     friend class Panelist;
-    friend class StreamProxy;
-    friend StreamProxy operator<<(std::ostream &stream,
-                                  const LineSelection &selection);
+    friend std::ostream &operator<<(std::ostream &stream,
+                                    const LineSelection &selection);
 
     LineSelection(Panelist *owner, std::size_t panel_index,
                   std::size_t line_from_bottom)
@@ -125,117 +122,6 @@ public:
     Panelist *_owner = nullptr;
     std::size_t _panel_index = 0;
     std::size_t _line_from_bottom = 0;
-  };
-
-  /**
-   * @brief Stream-like proxy returned after selecting a panel target.
-   *
-   * When panel output is enabled, insertions are forwarded to the selected
-   * stream. When panel output is disabled, insertions in the same `<<` chain
-   * are discarded.
-   */
-  class StreamProxy {
-  public:
-    StreamProxy(std::ostream &stream, bool forward)
-        : _stream(&stream), _forward(forward) {}
-
-    template <typename T> StreamProxy &operator<<(T &&value) {
-      if (_forward) {
-        *_stream << std::forward<T>(value);
-      }
-
-      return *this;
-    }
-
-    StreamProxy &operator<<(std::ostream &(*manipulator)(std::ostream &)) {
-      if (_forward) {
-        manipulator(*_stream);
-      }
-
-      return *this;
-    }
-
-    StreamProxy &operator<<(std::ios &(*manipulator)(std::ios &)) {
-      if (_forward) {
-        manipulator(*_stream);
-      }
-
-      return *this;
-    }
-
-    StreamProxy &operator<<(std::ios_base &(*manipulator)(std::ios_base &)) {
-      if (_forward) {
-        manipulator(*_stream);
-      }
-
-      return *this;
-    }
-
-    StreamProxy &operator<<(const PanelSelection &selection) {
-      select(selection);
-      return *this;
-    }
-
-    StreamProxy &operator<<(const LineSelection &selection) {
-      select(selection);
-      return *this;
-    }
-
-    operator std::ostream &() const {
-      return _forward ? *_stream : null_stream();
-    }
-
-  private:
-    class NullBuffer : public std::streambuf {
-    protected:
-      int_type overflow(int_type value) override {
-        return traits_type::not_eof(value);
-      }
-
-      std::streamsize xsputn(const char *, std::streamsize count) override {
-        return count;
-      }
-
-      int sync() override { return 0; }
-    };
-
-    static std::ostream &null_stream() {
-      static NullBuffer buffer;
-      static std::ostream stream(&buffer);
-      return stream;
-    }
-
-    void select(const PanelSelection &selection) {
-      if (!_forward) {
-        return;
-      }
-
-      if (selection._owner == nullptr) {
-        _forward = true;
-        return;
-      }
-
-      _forward = selection._owner->begin_selection(*_stream,
-                                                   selection._panel_index,
-                                                   std::nullopt);
-    }
-
-    void select(const LineSelection &selection) {
-      if (!_forward) {
-        return;
-      }
-
-      if (selection._owner == nullptr) {
-        _forward = true;
-        return;
-      }
-
-      _forward = selection._owner->begin_selection(
-          *_stream, selection._panel_index, selection._line_from_bottom);
-    }
-
-    std::ostream *_stream = nullptr;
-    bool _forward = true;
   };
 
   /**
@@ -397,8 +283,8 @@ public:
    * @brief Enable or disable panel output.
    *
    * Passing `true` is equivalent to enable(); passing `false` is equivalent to
-   * disable(). While disabled, insertions that start with a panel selection are
-   * discarded.
+   * disable(). While disabled, panel selections are transparent no-ops and
+   * output is written normally.
    *
    * @throws std::logic_error If @p onoff is true and layout() has not been
    * called.
@@ -447,8 +333,8 @@ public:
    * @brief Temporarily leave panel mode and restore normal stream output.
    *
    * Existing panel definitions and buffered panel contents are preserved, so
-   * enable() can later re-enter panel mode. While disabled, insertions that
-   * start with a panel selection are discarded.
+   * enable() can later re-enter panel mode. While disabled, panel selections
+   * are transparent no-ops and output is written normally.
    */
   void disable() { enable(false); }
 
@@ -620,10 +506,10 @@ private:
     Panelist &_owner;
   };
 
-  friend StreamProxy operator<<(std::ostream &stream,
-                                const PanelSelection &selection);
-  friend StreamProxy operator<<(std::ostream &stream,
-                                const LineSelection &selection);
+  friend std::ostream &operator<<(std::ostream &stream,
+                                  const PanelSelection &selection);
+  friend std::ostream &operator<<(std::ostream &stream,
+                                  const LineSelection &selection);
 
   static std::optional<int> fd_for_stream(const std::ostream &stream) {
     if (&stream == &std::cout) {
@@ -901,16 +787,6 @@ private:
     finalize_for_target_switch(next);
     _active_target = std::move(next);
     install_capture_buffer();
-  }
-
-  bool begin_selection(std::ostream &stream, std::size_t panel_index,
-                       std::optional<std::size_t> line_from_bottom) {
-    if (_laid_out && !_enabled) {
-      return false;
-    }
-
-    begin_capture(stream, panel_index, line_from_bottom);
-    return true;
   }
 
   static bool same_target(const Target &lhs, const Target &rhs) {
@@ -1202,24 +1078,21 @@ Panelist::PanelSelection::operator[](std::size_t line_from_bottom) const {
  * @param stream Stream that must be the stream managed by the owning Panelist
  * object when panel mode is active.
  * @param selection Panel selection proxy returned by Panelist::operator[].
- * @return A proxy that forwards insertions while panel output is enabled and
- * discards them while panel output is disabled.
+ * @return @p stream.
  *
  * @throws std::logic_error If @p selection is inserted into a different stream
  * while panel mode is active.
  * @throws std::out_of_range If the selected panel index is invalid while panel
  * mode is active.
  */
-inline Panelist::StreamProxy
-operator<<(std::ostream &stream,
-           const Panelist::PanelSelection &selection) {
-  bool forward = true;
+inline std::ostream &operator<<(std::ostream &stream,
+                                const Panelist::PanelSelection &selection) {
   if (selection._owner != nullptr) {
-    forward = selection._owner->begin_selection(stream, selection._panel_index,
-                                                std::nullopt);
+    selection._owner->begin_capture(stream, selection._panel_index,
+                                    std::nullopt);
   }
 
-  return Panelist::StreamProxy(stream, forward);
+  return stream;
 }
 
 /**
@@ -1229,24 +1102,21 @@ operator<<(std::ostream &stream,
  * object when panel mode is active.
  * @param selection Line selection proxy returned by
  * Panelist::PanelSelection::operator[] or Panelist::line().
- * @return A proxy that forwards insertions while panel output is enabled and
- * discards them while panel output is disabled.
+ * @return @p stream.
  *
  * @throws std::logic_error If @p selection is inserted into a different stream
  * while panel mode is active.
  * @throws std::out_of_range If the selected panel or line index is invalid
  * while panel mode is active.
  */
-inline Panelist::StreamProxy
-operator<<(std::ostream &stream,
-           const Panelist::LineSelection &selection) {
-  bool forward = true;
+inline std::ostream &operator<<(std::ostream &stream,
+                                const Panelist::LineSelection &selection) {
   if (selection._owner != nullptr) {
-    forward = selection._owner->begin_selection(
-        stream, selection._panel_index, selection._line_from_bottom);
+    selection._owner->begin_capture(stream, selection._panel_index,
+                                    selection._line_from_bottom);
   }
 
-  return Panelist::StreamProxy(stream, forward);
+  return stream;
 }
 
 } // namespace Panelist

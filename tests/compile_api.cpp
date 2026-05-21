@@ -25,12 +25,15 @@ int main() {
 
   panels.disable();
   assert(!panels.enabled());
-  output << panels[1] << "disabled output is dropped\n";
-  output << panels[2][0] << "disabled addressed output is dropped"
+  output << panels[1] << "disabled remains transparent\n";
+  output << panels[2][0] << "disabled addressed remains transparent"
          << std::endl;
   std::ostream &disabled_stream = output << panels[2][0];
-  disabled_stream << "disabled converted output is dropped\n";
-  assert(output.str() == "top panel\nmiddle panel\nbottom addressed\n");
+  disabled_stream << "disabled converted remains transparent\n";
+  assert(output.str() ==
+         "top panel\nmiddle panel\nbottom addressed\ndisabled remains "
+         "transparent\ndisabled addressed remains transparent\n"
+         "disabled converted remains transparent\n");
 
   panels.enable(true);
   assert(panels.enabled());
@@ -38,9 +41,12 @@ int main() {
 
   panels.enable(false);
   assert(!panels.enabled());
-  output << panels[1] << "enable false output is dropped\n";
+  output << panels[1] << "enable false remains transparent\n";
   assert(output.str() ==
-         "top panel\nmiddle panel\nbottom addressed\nenabled again\n");
+         "top panel\nmiddle panel\nbottom addressed\ndisabled remains "
+         "transparent\ndisabled addressed remains transparent\n"
+         "disabled converted remains transparent\nenabled again\n"
+         "enable false remains transparent\n");
 
   panels.enable();
   assert(panels.enabled());
@@ -51,5 +57,8 @@ int main() {
   output << panels[0] << "reused\n";
 
   assert(output.str() ==
-         "top panel\nmiddle panel\nbottom addressed\nenabled again\nreused\n");
+         "top panel\nmiddle panel\nbottom addressed\ndisabled remains "
+         "transparent\ndisabled addressed remains transparent\n"
+         "disabled converted remains transparent\nenabled again\n"
+         "enable false remains transparent\nreused\n");
 }
