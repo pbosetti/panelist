@@ -780,13 +780,33 @@ private:
     next.line_cursor = line_from_bottom.value_or(0);
 
     if (_active_target.has_value() && same_target(*_active_target, next)) {
+      if (next.line_from_bottom.has_value()) {
+        _active_target = std::move(next);
+        if (clear_addressed_target_line(*_active_target)) {
+          render_all();
+        }
+      }
+
       install_capture_buffer();
       return;
     }
 
     finalize_for_target_switch(next);
     _active_target = std::move(next);
+    if (clear_addressed_target_line(*_active_target)) {
+      render_all();
+    }
     install_capture_buffer();
+  }
+
+  bool clear_addressed_target_line(const Target &target) {
+    if (!target.line_from_bottom.has_value()) {
+      return false;
+    }
+
+    set_addressed_line(target.panel_index, *target.line_from_bottom,
+                       std::string());
+    return true;
   }
 
   static bool same_target(const Target &lhs, const Target &rhs) {
