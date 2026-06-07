@@ -61,4 +61,22 @@ int main() {
          "transparent\ndisabled addressed remains transparent\n"
          "disabled converted remains transparent\nenabled again\n"
          "enable false remains transparent\nreused\n");
+
+  // Verify that set_scrollable compiles and is accepted before layout().
+  {
+    std::ostringstream scroll_out;
+    Panelist::Panelist scroll_panels(scroll_out);
+    scroll_panels.add_panel(2);
+    scroll_panels.add_panel(); // flexible panel
+    scroll_panels.add_panel(1);
+    scroll_panels.set_scrollable(200); // request a 200-line history buffer
+    scroll_panels.layout();
+
+    // In non-interactive mode the scroll buffer is still populated; lines go
+    // straight through to the stream as normal.
+    for (int i = 0; i < 10; ++i) {
+      scroll_out << scroll_panels[1] << "line " << i << "\n";
+    }
+    scroll_panels.disable();
+  }
 }

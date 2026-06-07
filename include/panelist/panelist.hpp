@@ -36,6 +36,7 @@
 #include <windows.h>
 #else
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -192,6 +193,26 @@ public:
   }
 
   /**
+   * @brief Make the flexible panel scrollable with a history buffer.
+   *
+   * When called before layout(), the flexible panel will maintain a scroll
+   * buffer. The effective buffer length is the maximum of the flexible panel's
+   * rendered height and @p buffer_length. The user can scroll the panel with
+   * arrow keys (Up/Down), Page Up/Down, and the mouse scroll wheel.
+   *
+   * If this method is not called, the flexible panel behaves exactly as before
+   * (a fixed-size display window with no history).
+   *
+   * @param buffer_length Minimum number of lines to keep in the scroll buffer.
+   *
+   * @throws std::logic_error If called after layout().
+   */
+  void set_scrollable(std::size_t buffer_length) {
+    ensure_not_laid_out("set_scrollable");
+    _requested_scroll_buffer_length = buffer_length;
+  }
+
+  /**
    * @brief Add the flexible panel.
    *
    * The flexible panel receives all terminal rows not consumed by fixed panels
@@ -301,7 +322,12 @@ public:
         finalize_for_disable();
         render_all();
         restore_stream_buffer();
-        write_raw("\x1b[?25h\x1b[?1049l");
+        std::string exit_seq;
+        if (_requested_scroll_buffer_length.has_value()) {
+          exit_seq += "\x1b[?1006l\x1b[?1000l"; // disable SGR mouse + mouse tracking
+        }
+        exit_seq += "\x1b[?25h\x1b[?1049l"; // show cursor, leave alternate screen
+        write_raw(exit_seq);
         flush_raw();
         restore_terminal_mode();
       }
@@ -325,7 +351,11 @@ public:
 
     enable_terminal_mode();
     recompute_layout(true);
-    write_raw("\x1b[?1049h\x1b[2J\x1b[?25l");
+    std::string enter_seq = "\x1b[?1049h\x1b[2J\x1b[?25l"; // alternate screen, clear, hide cursor
+    if (_requested_scroll_buffer_length.has_value()) {
+      enter_seq += "\x1b[?1000h\x1b[?1006h"; // enable mouse tracking + SGR extended coords
+    }
+    write_raw(enter_seq);
     render_all();
   }
 
@@ -353,6 +383,7 @@ public:
     _effective_flexible_panel.reset();
     _terminal_size.reset();
     _active_target.reset();
+    _requested_scroll_buffer_length.reset();
     _laid_out = false;
   }
 
@@ -381,7 +412,12 @@ public:
 
     if (panel_index < _panel_states.size()) {
       auto &state = _panel_states[panel_index];
-      std::fill(state.lines.begin(), state.lines.end(), std::string());
+      if (is_flexible_scrollable_panel(panel_index)) {
+        state.lines.clear();
+        state.scroll_offset = 0;
+      } else {
+        std::fill(state.lines.begin(), state.lines.end(), std::string());
+      }
       state.log_pending.clear();
     }
 
@@ -457,6 +493,8 @@ private:
   struct PanelState {
     std::vector<std::string> lines;
     std::string log_pending;
+    std::size_t scroll_offset = 0;   // lines scrolled back from bottom (0 = following tail)
+    std::size_t buffer_capacity = 0; // effective history buffer size (0 = non-scrollable)
   };
 
   struct PanelGeometry {
@@ -567,6 +605,12 @@ private:
 
   bool panel_mode_active() const {
     return _interactive && _laid_out && _enabled;
+  }
+
+  bool is_flexible_scrollable_panel(std::size_t panel_index) const {
+    return _effective_flexible_panel.has_value() &&
+           *_effective_flexible_panel == panel_index &&
+           _requested_scroll_buffer_length.has_value();
   }
 
   void ensure_not_laid_out(std::string_view function_name) const {
@@ -690,7 +734,33 @@ private:
   }
 
   void resize_panel_state(std::size_t panel_index, std::size_t height) {
-    auto &lines = _panel_states[panel_index].lines;
+    auto &state = _panel_states[panel_index];
+    auto &lines = state.lines;
+
+    if (is_flexible_scrollable_panel(panel_index)) {
+      // For a scrollable panel, `lines` is the history buffer; its size is
+      // max(height, requested_buffer_length) and grows up to that capacity.
+      const std::size_t new_cap =
+          (std::max)(height, *_requested_scroll_buffer_length);
+      state.buffer_capacity = new_cap;
+
+      // Trim history buffer to new capacity, adjusting scroll offset so the
+      // viewed window does not jump.
+      while (lines.size() > new_cap) {
+        lines.erase(lines.begin());
+        if (state.scroll_offset > 0) {
+          --state.scroll_offset;
+        }
+      }
+
+      // Clamp scroll offset to the valid range for the new height.
+      const std::size_t max_off =
+          lines.size() > height ? lines.size() - height : 0;
+      state.scroll_offset = (std::min)(state.scroll_offset, max_off);
+      return;
+    }
+
+    // Non-scrollable: fixed-size window of exactly `height` lines.
     if (lines.size() == height) {
       return;
     }
@@ -724,13 +794,30 @@ private:
 
     mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     SetConsoleMode(_console_handle, mode);
+#else
+    if (_requested_scroll_buffer_length.has_value() && !_stdin_termios_saved) {
+    if (tcgetattr(STDIN_FILENO, &_original_stdin_termios) == 0) {
+      _stdin_termios_saved = true;
+      struct termios raw = _original_stdin_termios;
+      raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON | ISIG);
+      raw.c_iflag &= ~static_cast<tcflag_t>(ICRNL | IXON);
+      raw.c_cc[VMIN] = 0;
+      raw.c_cc[VTIME] = 0;
+      tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+    }
+    }
 #endif
   }
 
   void restore_terminal_mode() {
 #if defined(_WIN32)
     if (_console_mode_saved && _console_handle != INVALID_HANDLE_VALUE) {
-      SetConsoleMode(_console_handle, _original_console_mode);
+    SetConsoleMode(_console_handle, _original_console_mode);
+    }
+#else
+    if (_stdin_termios_saved) {
+    tcsetattr(STDIN_FILENO, TCSANOW, &_original_stdin_termios);
+    _stdin_termios_saved = false;
     }
 #endif
   }
@@ -900,13 +987,35 @@ private:
   }
 
   void append_log_line(std::size_t panel_index, const std::string &line) {
-    auto &lines = _panel_states[panel_index].lines;
-    if (lines.empty()) {
-      return;
-    }
+    auto &state = _panel_states[panel_index];
+    auto &lines = state.lines;
 
-    lines.erase(lines.begin());
-    lines.push_back(line);
+    if (is_flexible_scrollable_panel(panel_index)) {
+      // Evict oldest line when buffer is at capacity.
+      if (state.buffer_capacity > 0 && lines.size() >= state.buffer_capacity) {
+        lines.erase(lines.begin());
+        // After eviction the scroll_offset needs no adjustment: the new line
+        // appended below will increment the offset (see below), net effect
+        // maintains the same viewed window.
+      }
+      lines.push_back(line);
+
+      // If scrolled up, keep the currently viewed window stable by advancing
+      // scroll_offset to account for the newly appended line at the tail.
+      if (state.scroll_offset > 0 && !_panel_geometry.empty() &&
+          panel_index < _panel_geometry.size()) {
+        const std::size_t height = _panel_geometry[panel_index].height;
+        const std::size_t max_off =
+            lines.size() > height ? lines.size() - height : 0;
+        state.scroll_offset = (std::min)(state.scroll_offset + 1, max_off);
+      }
+    } else {
+      if (lines.empty()) {
+        return;
+      }
+      lines.erase(lines.begin());
+      lines.push_back(line);
+    }
   }
 
   void commit_log_pending(std::size_t panel_index) {
@@ -963,6 +1072,12 @@ private:
 
     recompute_layout(false);
 
+    // Poll for keyboard/mouse scroll events before rendering so the new
+    // scroll_offset is reflected in this frame.
+    if (_requested_scroll_buffer_length.has_value()) {
+      poll_scroll_input();
+    }
+
     for (std::size_t panel_index = 0; panel_index < _panel_geometry.size();
          ++panel_index) {
       render_panel(panel_index);
@@ -975,29 +1090,187 @@ private:
     flush_raw();
   }
 
+  // ---------------------------------------------------------------------------
+  // Scroll input handling (keyboard arrows and mouse wheel)
+  // ---------------------------------------------------------------------------
+
+  void apply_scroll(int delta) {
+    if (!_effective_flexible_panel.has_value()) {
+      return;
+    }
+    const std::size_t flex = *_effective_flexible_panel;
+    if (flex >= _panel_states.size() || flex >= _panel_geometry.size()) {
+      return;
+    }
+    auto &state = _panel_states[flex];
+    const std::size_t height = _panel_geometry[flex].height;
+    const std::size_t max_off =
+        state.lines.size() > height ? state.lines.size() - height : 0;
+
+    if (delta > 0) {
+      // Scroll up (toward history).
+      const std::size_t step = static_cast<std::size_t>(delta);
+      state.scroll_offset =
+          (std::min)(state.scroll_offset + step, max_off);
+    } else if (delta < 0) {
+      // Scroll down (toward tail).
+      const std::size_t step = static_cast<std::size_t>(-delta);
+      state.scroll_offset =
+          step >= state.scroll_offset ? 0 : state.scroll_offset - step;
+    }
+  }
+
+  // Process a chunk of raw bytes from the terminal input and update scroll.
+  void process_scroll_input(const char *data, std::size_t len) {
+    if (!_effective_flexible_panel.has_value() ||
+        _panel_geometry.empty()) {
+      return;
+    }
+    const std::size_t height =
+        _panel_geometry[*_effective_flexible_panel].height;
+    bool changed = false;
+
+    std::size_t i = 0;
+    while (i < len) {
+      const unsigned char ch = static_cast<unsigned char>(data[i]);
+      if (ch == 0x1b && i + 1 < len && data[i + 1] == '[') {
+        if (i + 2 < len) {
+          const char third = data[i + 2];
+          if (third == 'A') {
+            // Up arrow: scroll up 1 line.
+            apply_scroll(1);
+            changed = true;
+            i += 3;
+            continue;
+          }
+          if (third == 'B') {
+            // Down arrow: scroll down 1 line.
+            apply_scroll(-1);
+            changed = true;
+            i += 3;
+            continue;
+          }
+          if (third == '<') {
+            // SGR mouse: \x1b[<Btn;X;YM or \x1b[<Btn;X;Ym
+            std::size_t j = i + 3;
+            while (j < len && data[j] != 'M' && data[j] != 'm') {
+              ++j;
+            }
+            if (j < len) {
+              // Parse button number (the part before the first ';').
+              std::size_t btn = 0;
+              std::size_t k = i + 3;
+              while (k < j && data[k] != ';') {
+                if (data[k] >= '0' && data[k] <= '9') {
+                  btn = btn * 10 + static_cast<std::size_t>(data[k] - '0');
+                }
+                ++k;
+              }
+              if (btn == 64) {
+                apply_scroll(1);  // wheel up
+                changed = true;
+              } else if (btn == 65) {
+                apply_scroll(-1); // wheel down
+                changed = true;
+              }
+              i = j + 1;
+              continue;
+            }
+            // Incomplete sequence — skip ESC and retry.
+            ++i;
+            continue;
+          }
+          if (third >= '0' && third <= '9') {
+            // Possibly \x1b[5~ (Page Up) or \x1b[6~ (Page Down).
+            std::size_t j = i + 3;
+            while (j < len && data[j] != '~') {
+              ++j;
+            }
+            if (j < len) {
+              const int num = third - '0';
+              if (num == 5) {
+                apply_scroll(static_cast<int>(height)); // Page Up
+                changed = true;
+              } else if (num == 6) {
+                apply_scroll(-static_cast<int>(height)); // Page Down
+                changed = true;
+              }
+              i = j + 1;
+              continue;
+            }
+            ++i;
+            continue;
+          }
+        }
+        ++i; // skip unrecognised ESC sequence byte
+      } else {
+        ++i;
+      }
+    }
+    (void)changed; // rendered in the next render_all call
+  }
+
+  void poll_scroll_input() {
+#if !defined(_WIN32)
+    if (!_stdin_termios_saved) {
+      return;
+    }
+    char buf[128];
+    for (;;) {
+      const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
+      if (n <= 0) {
+        break;
+      }
+      process_scroll_input(buf, static_cast<std::size_t>(n));
+    }
+#endif
+  }
+
+
   void render_panel(std::size_t panel_index) {
     const auto &geometry = _panel_geometry[panel_index];
     const auto &state = _panel_states[panel_index];
+    const bool scrollable = is_flexible_scrollable_panel(panel_index);
 
     for (std::size_t line_index = 0; line_index < geometry.height;
          ++line_index) {
-      std::string line =
-          line_index < state.lines.size() ? state.lines[line_index]
-                                          : std::string();
+      std::string line;
 
-      if (!state.log_pending.empty() && line_index + 1 == geometry.height) {
-        line = state.log_pending;
-      }
+      if (scrollable) {
+        // Determine the visible slice of the history buffer.
+        // scroll_offset=0: show the tail (newest `height` lines).
+        // scroll_offset=k: show lines [buf_size-height-k, buf_size-k).
+        const std::size_t buf_size = state.lines.size();
+        const std::size_t visible_end =
+            buf_size > state.scroll_offset ? buf_size - state.scroll_offset : 0;
+        const std::size_t visible_start =
+            visible_end > geometry.height ? visible_end - geometry.height : 0;
+        const std::size_t buf_idx = visible_start + line_index;
+        line = buf_idx < buf_size ? state.lines[buf_idx] : std::string();
 
-      if (_active_target.has_value() &&
-          _active_target->panel_index == panel_index &&
-          _active_target->line_from_bottom.has_value() &&
-          !_active_target->pending.empty() &&
-          _active_target->line_cursor < geometry.height) {
-        const std::size_t active_line =
-            geometry.height - _active_target->line_cursor - 1;
-        if (line_index == active_line) {
-          line = _active_target->pending;
+        // Show partially-typed log line at the bottom only when at tail.
+        if (!state.log_pending.empty() && line_index + 1 == geometry.height &&
+            state.scroll_offset == 0) {
+          line = state.log_pending;
+        }
+      } else {
+        line = line_index < state.lines.size() ? state.lines[line_index]
+                                               : std::string();
+
+        if (!state.log_pending.empty() && line_index + 1 == geometry.height) {
+          line = state.log_pending;
+        }
+
+        if (_active_target.has_value() &&
+            _active_target->panel_index == panel_index &&
+            _active_target->line_from_bottom.has_value() &&
+            !_active_target->pending.empty() &&
+            _active_target->line_cursor < geometry.height) {
+          const std::size_t active_line =
+              geometry.height - _active_target->line_cursor - 1;
+          if (line_index == active_line) {
+            line = _active_target->pending;
+          }
         }
       }
 
@@ -1079,11 +1352,15 @@ private:
   std::optional<TerminalSize> _terminal_size;
   std::optional<Target> _active_target;
   std::string _separator = "-";
+  std::optional<std::size_t> _requested_scroll_buffer_length;
 
 #if defined(_WIN32)
   HANDLE _console_handle = INVALID_HANDLE_VALUE;
   DWORD _original_console_mode = 0;
   bool _console_mode_saved = false;
+#else
+  struct termios _original_stdin_termios {};
+  bool _stdin_termios_saved = false;
 #endif
 };
 

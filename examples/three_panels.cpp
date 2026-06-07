@@ -37,8 +37,11 @@ int main(int argc, char **argv) {
     Panelist::Panelist panels(std::cout);
     panels.set_separator("=");
     panels.add_panel(2);
-    panels.add_panel();
+    panels.add_panel();   // flexible panel — made scrollable below
     panels.add_panel(2);
+    // Keep 200 lines of history in the flexible panel; the user can scroll
+    // with the Up/Down arrow keys, Page Up/Down, or the mouse wheel.
+    panels.set_scrollable(200);
     panels.layout();
 
     std::cout << panels[0][1] << "three_panels" << std::endl;
