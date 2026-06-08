@@ -23,6 +23,8 @@ string(REGEX REPLACE "^v" "" PANELIST_PROJECT_VERSION
 
 project(panelist VERSION "${PANELIST_PROJECT_VERSION}" LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 set(PANELIST_IS_TOP_LEVEL OFF)
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
   set(PANELIST_IS_TOP_LEVEL ON)
@@ -44,6 +46,7 @@ target_include_directories(
     $<BUILD_INTERFACE:${PANELIST_GENERATED_INCLUDE_DIR}>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
+target_link_libraries(panelist INTERFACE Threads::Threads)
 
 option(PANELIST_BUILD_TESTS "Build Panelist tests" ${PANELIST_IS_TOP_LEVEL})
 option(PANELIST_BUILD_EXAMPLES "Build Panelist examples" ${PANELIST_IS_TOP_LEVEL})

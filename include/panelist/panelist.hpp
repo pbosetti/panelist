@@ -14,17 +14,22 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <ios>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <streambuf>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -36,6 +41,7 @@
 #include <windows.h>
 #else
 #include <sys/ioctl.h>
+#include <signal.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -186,6 +192,7 @@ public:
    * are treated as a single space.
    */
   void set_separator(std::string separator) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     _separator = separator.empty() ? std::string(" ") : std::move(separator);
     if (panel_mode_active()) {
       render_all();
@@ -208,6 +215,7 @@ public:
    * @throws std::logic_error If called after layout().
    */
   void set_scrollable(std::size_t buffer_length) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     ensure_not_laid_out("set_scrollable");
     _requested_scroll_buffer_length = buffer_length;
   }
@@ -222,6 +230,7 @@ public:
    * was already added.
    */
   void add_panel() {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     ensure_not_laid_out("add_panel");
     if (_explicit_flexible_panel.has_value()) {
       throw std::logic_error("Panelist already has a flexible panel");
@@ -243,6 +252,7 @@ public:
    * @throws std::invalid_argument If @p height is zero.
    */
   void add_panel(std::size_t height) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     ensure_not_laid_out("add_panel");
     if (height == 0) {
       throw std::invalid_argument("Panelist panel height must be at least 1");
@@ -260,6 +270,7 @@ public:
    * @throws std::out_of_range If @p panel_index does not name an added panel.
    */
   void set_flexible_panel(std::size_t panel_index) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     ensure_not_laid_out("set_flexible_panel");
     if (panel_index >= _panel_specs.size()) {
       throw std::out_of_range("Panelist panel index is out of range");
@@ -280,14 +291,17 @@ public:
    * requested panel layout.
    */
   void layout() {
-    if (_panel_specs.empty()) {
-      throw std::logic_error("Panelist layout requires at least one panel");
-    }
+    {
+      std::lock_guard<std::recursive_mutex> lock(_mutex);
+      if (_panel_specs.empty()) {
+        throw std::logic_error("Panelist layout requires at least one panel");
+      }
 
-    _effective_flexible_panel =
-        _explicit_flexible_panel.value_or(_panel_specs.size() - 1);
-    _panel_states.resize(_panel_specs.size());
-    _laid_out = true;
+      _effective_flexible_panel =
+          _explicit_flexible_panel.value_or(_panel_specs.size() - 1);
+      _panel_states.resize(_panel_specs.size());
+      _laid_out = true;
+    }
     enable();
   }
 
@@ -314,6 +328,8 @@ public:
    */
   void enable(bool onoff) {
     if (!onoff) {
+      stop_scroll_input_monitor();
+      std::lock_guard<std::recursive_mutex> lock(_mutex);
       if (!_enabled) {
         return;
       }
@@ -330,33 +346,45 @@ public:
         write_raw(exit_seq);
         flush_raw();
         restore_terminal_mode();
+        restore_terminal_signal_handlers();
       }
 
       _enabled = false;
       return;
     }
 
-    if (!_laid_out) {
-      throw std::logic_error("Panelist::layout must be called before enable");
+    bool start_monitor = false;
+    {
+      std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+      if (!_laid_out) {
+        throw std::logic_error("Panelist::layout must be called before enable");
+      }
+
+      if (_enabled) {
+        return;
+      }
+
+      _enabled = true;
+      if (!panel_mode_active()) {
+        return;
+      }
+
+      enable_terminal_mode();
+      install_terminal_signal_handlers();
+      recompute_layout(true);
+      std::string enter_seq = "\x1b[?1049h\x1b[2J\x1b[?25l"; // alternate screen, clear, hide cursor
+      if (_requested_scroll_buffer_length.has_value()) {
+        enter_seq += "\x1b[?1000h\x1b[?1006h"; // enable mouse tracking + SGR extended coords
+      }
+      write_raw(enter_seq);
+      render_all();
+      start_monitor = should_run_scroll_input_monitor();
     }
 
-    if (_enabled) {
-      return;
+    if (start_monitor) {
+      start_scroll_input_monitor();
     }
-
-    _enabled = true;
-    if (!panel_mode_active()) {
-      return;
-    }
-
-    enable_terminal_mode();
-    recompute_layout(true);
-    std::string enter_seq = "\x1b[?1049h\x1b[2J\x1b[?25l"; // alternate screen, clear, hide cursor
-    if (_requested_scroll_buffer_length.has_value()) {
-      enter_seq += "\x1b[?1000h\x1b[?1006h"; // enable mouse tracking + SGR extended coords
-    }
-    write_raw(enter_seq);
-    render_all();
   }
 
   /**
@@ -376,6 +404,7 @@ public:
    */
   void reset() {
     disable();
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     _panel_specs.clear();
     _panel_states.clear();
     _panel_geometry.clear();
@@ -408,6 +437,7 @@ public:
    * @throws std::out_of_range If @p panel_index does not name an added panel.
    */
   void clear(std::size_t panel_index) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     ensure_panel_index(panel_index);
 
     if (panel_index < _panel_states.size()) {
@@ -796,15 +826,16 @@ private:
     SetConsoleMode(_console_handle, mode);
 #else
     if (_requested_scroll_buffer_length.has_value() && !_stdin_termios_saved) {
-    if (tcgetattr(STDIN_FILENO, &_original_stdin_termios) == 0) {
-      _stdin_termios_saved = true;
-      struct termios raw = _original_stdin_termios;
-      raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON | ISIG);
-      raw.c_iflag &= ~static_cast<tcflag_t>(ICRNL | IXON);
-      raw.c_cc[VMIN] = 0;
-      raw.c_cc[VTIME] = 0;
-      tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-    }
+      if (tcgetattr(STDIN_FILENO, &_original_stdin_termios) == 0) {
+        _stdin_termios_saved = true;
+        struct termios raw = _original_stdin_termios;
+        // Keep ISIG enabled so CTRL-C and CTRL-Z remain terminal signals.
+        raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON);
+        raw.c_iflag &= ~static_cast<tcflag_t>(ICRNL | IXON);
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+      }
     }
 #endif
   }
@@ -812,12 +843,164 @@ private:
   void restore_terminal_mode() {
 #if defined(_WIN32)
     if (_console_mode_saved && _console_handle != INVALID_HANDLE_VALUE) {
-    SetConsoleMode(_console_handle, _original_console_mode);
+      SetConsoleMode(_console_handle, _original_console_mode);
     }
 #else
     if (_stdin_termios_saved) {
-    tcsetattr(STDIN_FILENO, TCSANOW, &_original_stdin_termios);
-    _stdin_termios_saved = false;
+      tcsetattr(STDIN_FILENO, TCSANOW, &_original_stdin_termios);
+      _stdin_termios_saved = false;
+    }
+#endif
+  }
+
+  void install_terminal_signal_handlers() {
+#if !defined(_WIN32)
+    _terminal_signal_output_fd =
+        static_cast<sig_atomic_t>(_fd.value_or(STDOUT_FILENO));
+    _terminal_signal_stdin_termios_saved = _stdin_termios_saved ? 1 : 0;
+    if (_stdin_termios_saved) {
+      _terminal_signal_original_stdin_termios = _original_stdin_termios;
+    }
+
+    for (std::size_t index = 0; index < TerminalSignalCount; ++index) {
+      install_terminal_signal_handler(terminal_signal_number(index), index);
+    }
+#endif
+  }
+
+  void restore_terminal_signal_handlers() {
+#if !defined(_WIN32)
+    for (std::size_t index = 0; index < TerminalSignalCount; ++index) {
+      restore_terminal_signal_handler(terminal_signal_number(index), index);
+    }
+    _terminal_signal_output_fd = -1;
+    _terminal_signal_stdin_termios_saved = 0;
+#endif
+  }
+
+#if !defined(_WIN32)
+  static int terminal_signal_number(std::size_t index) {
+    switch (index) {
+    case 0:
+      return SIGINT;
+    case 1:
+      return SIGTERM;
+    case 2:
+      return SIGHUP;
+    default:
+      return SIGQUIT;
+    }
+  }
+
+  static void install_terminal_signal_handler(int signal_number,
+                                              std::size_t index) {
+    if (_terminal_signal_handler_installed[index]) {
+      return;
+    }
+
+    struct sigaction previous_action {};
+    if (::sigaction(signal_number, nullptr, &previous_action) != 0) {
+      return;
+    }
+
+    if (previous_action.sa_handler != SIG_DFL) {
+      return;
+    }
+
+    struct sigaction action {};
+    action.sa_handler = &Panelist::handle_terminal_signal;
+    sigemptyset(&action.sa_mask);
+    if (::sigaction(signal_number, &action, nullptr) == 0) {
+      _terminal_previous_signal_actions[index] = previous_action;
+      _terminal_signal_handler_installed[index] = true;
+    }
+  }
+
+  static void restore_terminal_signal_handler(int signal_number,
+                                              std::size_t index) {
+    if (!_terminal_signal_handler_installed[index]) {
+      return;
+    }
+
+    struct sigaction current_action {};
+    if (::sigaction(signal_number, nullptr, &current_action) == 0 &&
+        current_action.sa_handler == &Panelist::handle_terminal_signal) {
+      ::sigaction(signal_number, &_terminal_previous_signal_actions[index],
+                  nullptr);
+    }
+
+    _terminal_signal_handler_installed[index] = false;
+  }
+
+  static void handle_terminal_signal(int signal_number) {
+    restore_terminal_from_signal();
+
+    struct sigaction action {};
+    action.sa_handler = SIG_DFL;
+    sigemptyset(&action.sa_mask);
+    ::sigaction(signal_number, &action, nullptr);
+    ::raise(signal_number);
+  }
+
+  static void restore_terminal_from_signal() {
+    const int fd = static_cast<int>(_terminal_signal_output_fd);
+    if (fd >= 0) {
+      constexpr char exit_seq[] = "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+      ::write(fd, exit_seq, sizeof(exit_seq) - 1);
+    }
+
+    if (_terminal_signal_stdin_termios_saved) {
+      ::tcsetattr(STDIN_FILENO, TCSANOW,
+                  &_terminal_signal_original_stdin_termios);
+    }
+  }
+#endif
+
+  bool should_run_scroll_input_monitor() const {
+#if !defined(_WIN32)
+    return panel_mode_active() && _requested_scroll_buffer_length.has_value() &&
+           _stdin_termios_saved;
+#else
+    return false;
+#endif
+  }
+
+  void start_scroll_input_monitor() {
+#if !defined(_WIN32)
+    if (_scroll_input_monitor.joinable()) {
+      return;
+    }
+
+    _scroll_input_monitor_stop_requested.store(false);
+    _scroll_input_monitor =
+        std::thread([this]() { scroll_input_monitor_loop(); });
+#endif
+  }
+
+  void stop_scroll_input_monitor() {
+#if !defined(_WIN32)
+    _scroll_input_monitor_stop_requested.store(true);
+    if (_scroll_input_monitor.joinable()) {
+      _scroll_input_monitor.join();
+    }
+#endif
+  }
+
+  void scroll_input_monitor_loop() {
+#if !defined(_WIN32)
+    while (!_scroll_input_monitor_stop_requested.load()) {
+      {
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
+        if (!should_run_scroll_input_monitor()) {
+          return;
+        }
+
+        if (poll_scroll_input()) {
+          render_all(false);
+        }
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 #endif
   }
@@ -842,6 +1025,7 @@ private:
 
   void begin_capture(std::ostream &stream, std::size_t panel_index,
                      std::optional<std::size_t> line_from_bottom) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     if (!panel_mode_active()) {
       return;
     }
@@ -931,6 +1115,7 @@ private:
   }
 
   void write_to_active_target(std::string_view text) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     if (!panel_mode_active() || !_active_target.has_value()) {
       write_raw(text);
       return;
@@ -975,6 +1160,7 @@ private:
   }
 
   void sync_capture_buffer() {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     if (panel_mode_active()) {
       if (_active_target.has_value() &&
           _active_target->line_from_bottom.has_value()) {
@@ -1065,7 +1251,8 @@ private:
     lines[line_index] = line;
   }
 
-  void render_all() {
+  void render_all(bool poll_input = true) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     if (!panel_mode_active()) {
       return;
     }
@@ -1074,7 +1261,7 @@ private:
 
     // Poll for keyboard/mouse scroll events before rendering so the new
     // scroll_offset is reflected in this frame.
-    if (_requested_scroll_buffer_length.has_value()) {
+    if (poll_input && _requested_scroll_buffer_length.has_value()) {
       poll_scroll_input();
     }
 
@@ -1094,18 +1281,19 @@ private:
   // Scroll input handling (keyboard arrows and mouse wheel)
   // ---------------------------------------------------------------------------
 
-  void apply_scroll(int delta) {
+  bool apply_scroll(int delta) {
     if (!_effective_flexible_panel.has_value()) {
-      return;
+      return false;
     }
     const std::size_t flex = *_effective_flexible_panel;
     if (flex >= _panel_states.size() || flex >= _panel_geometry.size()) {
-      return;
+      return false;
     }
     auto &state = _panel_states[flex];
     const std::size_t height = _panel_geometry[flex].height;
     const std::size_t max_off =
         state.lines.size() > height ? state.lines.size() - height : 0;
+    const std::size_t previous_offset = state.scroll_offset;
 
     if (delta > 0) {
       // Scroll up (toward history).
@@ -1118,13 +1306,15 @@ private:
       state.scroll_offset =
           step >= state.scroll_offset ? 0 : state.scroll_offset - step;
     }
+
+    return state.scroll_offset != previous_offset;
   }
 
   // Process a chunk of raw bytes from the terminal input and update scroll.
-  void process_scroll_input(const char *data, std::size_t len) {
+  bool process_scroll_input(const char *data, std::size_t len) {
     if (!_effective_flexible_panel.has_value() ||
         _panel_geometry.empty()) {
-      return;
+      return false;
     }
     const std::size_t height =
         _panel_geometry[*_effective_flexible_panel].height;
@@ -1133,20 +1323,33 @@ private:
     std::size_t i = 0;
     while (i < len) {
       const unsigned char ch = static_cast<unsigned char>(data[i]);
+      // Fallback for PTY paths that deliver signal characters as bytes.
+#if !defined(_WIN32) && defined(VINTR)
+      if (is_configured_signal_character(ch, VINTR)) {
+        std::raise(SIGINT);
+        ++i;
+        continue;
+      }
+#endif
+#if !defined(_WIN32) && defined(VSUSP) && defined(SIGTSTP)
+      if (is_configured_signal_character(ch, VSUSP)) {
+        std::raise(SIGTSTP);
+        ++i;
+        continue;
+      }
+#endif
       if (ch == 0x1b && i + 1 < len && data[i + 1] == '[') {
         if (i + 2 < len) {
           const char third = data[i + 2];
           if (third == 'A') {
             // Up arrow: scroll up 1 line.
-            apply_scroll(1);
-            changed = true;
+            changed = apply_scroll(1) || changed;
             i += 3;
             continue;
           }
           if (third == 'B') {
             // Down arrow: scroll down 1 line.
-            apply_scroll(-1);
-            changed = true;
+            changed = apply_scroll(-1) || changed;
             i += 3;
             continue;
           }
@@ -1167,11 +1370,9 @@ private:
                 ++k;
               }
               if (btn == 64) {
-                apply_scroll(1);  // wheel up
-                changed = true;
+                changed = apply_scroll(1) || changed; // wheel up
               } else if (btn == 65) {
-                apply_scroll(-1); // wheel down
-                changed = true;
+                changed = apply_scroll(-1) || changed; // wheel down
               }
               i = j + 1;
               continue;
@@ -1189,11 +1390,9 @@ private:
             if (j < len) {
               const int num = third - '0';
               if (num == 5) {
-                apply_scroll(static_cast<int>(height)); // Page Up
-                changed = true;
+                changed = apply_scroll(static_cast<int>(height)) || changed;
               } else if (num == 6) {
-                apply_scroll(-static_cast<int>(height)); // Page Down
-                changed = true;
+                changed = apply_scroll(-static_cast<int>(height)) || changed;
               }
               i = j + 1;
               continue;
@@ -1207,22 +1406,49 @@ private:
         ++i;
       }
     }
-    (void)changed; // rendered in the next render_all call
+    return changed;
   }
 
-  void poll_scroll_input() {
+#if !defined(_WIN32)
+  bool is_configured_signal_character(unsigned char ch,
+                                      int termios_index) const {
+    if (!_stdin_termios_saved) {
+      return false;
+    }
+#if defined(NCCS)
+    if (termios_index < 0 ||
+        static_cast<std::size_t>(termios_index) >= NCCS) {
+      return false;
+    }
+#endif
+    const cc_t value = _original_stdin_termios.c_cc[termios_index];
+#if defined(_POSIX_VDISABLE)
+    if (value == static_cast<cc_t>(_POSIX_VDISABLE)) {
+      return false;
+    }
+#endif
+    return ch == static_cast<unsigned char>(value);
+  }
+#endif
+
+  bool poll_scroll_input() {
 #if !defined(_WIN32)
     if (!_stdin_termios_saved) {
-      return;
+      return false;
     }
+    bool changed = false;
     char buf[128];
     for (;;) {
       const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
       if (n <= 0) {
         break;
       }
-      process_scroll_input(buf, static_cast<std::size_t>(n));
+      changed =
+          process_scroll_input(buf, static_cast<std::size_t>(n)) || changed;
     }
+    return changed;
+#else
+    return false;
 #endif
   }
 
@@ -1232,26 +1458,42 @@ private:
     const auto &state = _panel_states[panel_index];
     const bool scrollable = is_flexible_scrollable_panel(panel_index);
 
+    // Pre-compute the visible window bounds for scrollable panels so the
+    // indicator logic below can reference them without re-deriving each line.
+    std::size_t scroll_visible_start = 0;
+    std::size_t scroll_visible_end = 0;
+    if (scrollable) {
+      const std::size_t buf_size = state.lines.size();
+      scroll_visible_end =
+          buf_size > state.scroll_offset ? buf_size - state.scroll_offset : 0;
+      scroll_visible_start =
+          scroll_visible_end > geometry.height
+              ? scroll_visible_end - geometry.height
+              : 0;
+    }
+
     for (std::size_t line_index = 0; line_index < geometry.height;
          ++line_index) {
       std::string line;
 
       if (scrollable) {
-        // Determine the visible slice of the history buffer.
-        // scroll_offset=0: show the tail (newest `height` lines).
-        // scroll_offset=k: show lines [buf_size-height-k, buf_size-k).
         const std::size_t buf_size = state.lines.size();
-        const std::size_t visible_end =
-            buf_size > state.scroll_offset ? buf_size - state.scroll_offset : 0;
-        const std::size_t visible_start =
-            visible_end > geometry.height ? visible_end - geometry.height : 0;
-        const std::size_t buf_idx = visible_start + line_index;
+        const std::size_t buf_idx = scroll_visible_start + line_index;
         line = buf_idx < buf_size ? state.lines[buf_idx] : std::string();
 
         // Show partially-typed log line at the bottom only when at tail.
         if (!state.log_pending.empty() && line_index + 1 == geometry.height &&
             state.scroll_offset == 0) {
           line = state.log_pending;
+        }
+
+        // Indicator: more content above the visible window.
+        if (line_index == 0 && scroll_visible_start > 0) {
+          line = "[more above...]";
+        }
+        // Indicator: more content below the visible window (scrolled up).
+        if (line_index + 1 == geometry.height && state.scroll_offset > 0) {
+          line = "[more below...]";
         }
       } else {
         line = line_index < state.lines.size() ? state.lines[line_index]
@@ -1337,6 +1579,7 @@ private:
   std::ostream &_stream;
   std::streambuf *_original_rdbuf = nullptr;
   CaptureBuffer _capture_buffer;
+  std::recursive_mutex _mutex;
   bool _capture_installed = false;
 
   std::optional<int> _fd;
@@ -1359,6 +1602,17 @@ private:
   DWORD _original_console_mode = 0;
   bool _console_mode_saved = false;
 #else
+  static constexpr std::size_t TerminalSignalCount = 4;
+  inline static bool _terminal_signal_handler_installed[TerminalSignalCount] =
+      {};
+  inline static struct sigaction
+      _terminal_previous_signal_actions[TerminalSignalCount] = {};
+  inline static volatile sig_atomic_t _terminal_signal_output_fd = -1;
+  inline static volatile sig_atomic_t _terminal_signal_stdin_termios_saved = 0;
+  inline static struct termios _terminal_signal_original_stdin_termios {};
+
+  std::atomic<bool> _scroll_input_monitor_stop_requested{false};
+  std::thread _scroll_input_monitor;
   struct termios _original_stdin_termios {};
   bool _stdin_termios_saved = false;
 #endif
